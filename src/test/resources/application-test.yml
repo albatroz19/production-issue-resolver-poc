@@ -1,0 +1,9 @@
+spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.ai.autoconfigure.azure.openai.AzureOpenAiAutoConfiguration
+
+issue-resolver:
+  repos-root: ${REPOS_ROOT:/Users/amitasharda/Desktop/Segmentation}
+  python-agent:
+    enabled: false

@@ -1,0 +1,43 @@
+server:
+  port: 8099
+
+spring:
+  application:
+    name: production-issue-resolver-poc
+  autoconfigure:
+    exclude:
+      - org.springframework.ai.autoconfigure.azure.openai.AzureOpenAiAutoConfiguration
+  ai:
+    azure:
+      openai:
+        api-key: ${AZURE_OPENAI_API_KEY:}
+        endpoint: ${AZURE_OPENAI_ENDPOINT:}
+        chat:
+          options:
+            deployment-name: ${AZURE_OPENAI_DEPLOYMENT:gpt-4o}
+            temperature: 0.2
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+issue-resolver:
+  repos-root: ${REPOS_ROOT:/Users/amitasharda/Desktop/Segmentation}
+  repos:
+    - name: campaign-management-service
+      path: campaign-management-service
+    - name: ad-management-service
+      path: ad-management-service
+  max-snippet-lines: 150
+  max-files-per-request: 3
+  agent:
+    max-steps: 8
+  api-key: ${POC_API_KEY:}
+  python-agent:
+    enabled: ${PYTHON_AGENT_ENABLED:true}
+    base-url: ${PYTHON_AGENT_BASE_URL:http://localhost:8098}
+    path: /api/v1/incidents/analyze/llm
+    connect-timeout-ms: 2000
+    read-timeout-ms: 60000
