@@ -15,6 +15,8 @@ public class IssueResolverProperties {
     private int maxFilesPerRequest = 3;
     private AgentConfig agent = new AgentConfig();
     private String apiKey = "";
+    private List<String> corsAllowedOrigins = new ArrayList<>(List.of("http://localhost:5173"));
+    private boolean gitCheckoutEnabled = true;
     private PythonAgentProperties pythonAgent = new PythonAgentProperties();
 
     @Data

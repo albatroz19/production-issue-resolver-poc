@@ -62,14 +62,33 @@ public class ParseStackTraceTool {
         }
 
         StackFrame topFrame = frames.isEmpty() ? null : frames.get(0);
+        StackFrame applicationTopFrame = frames.stream()
+                .filter(this::isApplicationFrame)
+                .findFirst()
+                .orElse(topFrame);
 
         return ParsedStackTrace.builder()
                 .exceptionType(exceptionType)
                 .exceptionMessage(exceptionMessage)
                 .topFrame(topFrame)
+                .applicationTopFrame(applicationTopFrame)
                 .frames(frames)
                 .causedByChain(causedByChain)
                 .build();
+    }
+
+    private boolean isApplicationFrame(StackFrame frame) {
+        if (frame == null || frame.getClassName() == null) {
+            return false;
+        }
+        String className = frame.getClassName();
+        if (className.startsWith("com.tataplay.")) {
+            return true;
+        }
+        return !className.startsWith("org.springframework.")
+                && !className.startsWith("java.")
+                && !className.startsWith("sun.")
+                && !className.startsWith("jdk.");
     }
 
     @Data
@@ -78,6 +97,7 @@ public class ParseStackTraceTool {
         private String exceptionType;
         private String exceptionMessage;
         private StackFrame topFrame;
+        private StackFrame applicationTopFrame;
         @Builder.Default
         private List<StackFrame> frames = new ArrayList<>();
         @Builder.Default

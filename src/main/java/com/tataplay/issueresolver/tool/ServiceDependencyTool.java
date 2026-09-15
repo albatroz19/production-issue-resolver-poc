@@ -51,6 +51,23 @@ public class ServiceDependencyTool {
         this.services = services;
     }
 
+    public ApiMapping resolveApiMapping(String serviceName, String apiPath) {
+        if (serviceName == null || apiPath == null || apiPath.isBlank()) {
+            return null;
+        }
+        ServiceDefinition service = services.get(serviceName);
+        if (service == null || service.getApiMappings() == null) {
+            return null;
+        }
+        String normalizedPath = stripQueryString(apiPath);
+        return findBestMapping(service.getApiMappings(), normalizedPath);
+    }
+
+    private static String stripQueryString(String apiPath) {
+        int queryIndex = apiPath.indexOf('?');
+        return queryIndex >= 0 ? apiPath.substring(0, queryIndex) : apiPath;
+    }
+
     private ApiMapping findBestMapping(Map<String, ApiMapping> mappings, String apiPath) {
         if (mappings.containsKey(apiPath)) {
             return mappings.get(apiPath);

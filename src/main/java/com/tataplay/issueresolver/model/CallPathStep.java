@@ -9,10 +9,13 @@ import lombok.NoArgsConstructor;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class AffectedFile {
+public class CallPathStep {
 
     private String repo;
+    private String className;
+    private String methodName;
     private String path;
-    private String lines;
+    private int line;
     private CallPathRole role;
+    private String snippet;
 }

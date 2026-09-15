@@ -3,16 +3,23 @@ package com.tataplay.issueresolver.agent;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tataplay.issueresolver.client.PythonAgentClient;
+import com.tataplay.issueresolver.config.EnvironmentRegistry;
 import com.tataplay.issueresolver.config.IssueResolverProperties;
 import com.tataplay.issueresolver.index.CodeSearchResult;
+import com.tataplay.issueresolver.index.EnvironmentIndexSnapshot;
 import com.tataplay.issueresolver.index.SimpleCodeIndexService;
 import com.tataplay.issueresolver.model.AffectedFile;
+import com.tataplay.issueresolver.model.CallPathRole;
+import com.tataplay.issueresolver.model.CallPathStep;
 import com.tataplay.issueresolver.model.ConfidenceLevel;
 import com.tataplay.issueresolver.model.DiagnosisResponse;
 import com.tataplay.issueresolver.model.IncidentRequest;
 import com.tataplay.issueresolver.service.DiagnosisMerger;
+import com.tataplay.issueresolver.tool.ApiCallPathTracer;
+import com.tataplay.issueresolver.tool.DownstreamErrorParser;
 import com.tataplay.issueresolver.tool.ParseStackTraceTool;
 import com.tataplay.issueresolver.tool.ServiceDependencyTool;
+import com.tataplay.issueresolver.tool.ServiceDependencyTool.ApiMapping;
 import com.tataplay.issueresolver.util.LogRedactor;
 import java.util.ArrayList;
 import java.util.List;
@@ -46,9 +53,12 @@ public class IssueResolverAgent {
             """;
 
     private final IssueResolverProperties properties;
+    private final EnvironmentRegistry environmentRegistry;
     private final ParseStackTraceTool parseStackTraceTool;
+    private final DownstreamErrorParser downstreamErrorParser;
     private final SimpleCodeIndexService codeIndexService;
     private final ServiceDependencyTool serviceDependencyTool;
+    private final ApiCallPathTracer apiCallPathTracer;
     private final ObjectMapper objectMapper;
     private final Optional<ChatClient> chatClient;
     private final PythonAgentClient pythonAgentClient;
@@ -56,17 +66,23 @@ public class IssueResolverAgent {
 
     public IssueResolverAgent(
             IssueResolverProperties properties,
+            EnvironmentRegistry environmentRegistry,
             ParseStackTraceTool parseStackTraceTool,
+            DownstreamErrorParser downstreamErrorParser,
             SimpleCodeIndexService codeIndexService,
             ServiceDependencyTool serviceDependencyTool,
+            ApiCallPathTracer apiCallPathTracer,
             ObjectMapper objectMapper,
             PythonAgentClient pythonAgentClient,
             DiagnosisMerger diagnosisMerger,
             @Autowired(required = false) ChatClient issueResolverChatClient) {
         this.properties = properties;
+        this.environmentRegistry = environmentRegistry;
         this.parseStackTraceTool = parseStackTraceTool;
+        this.downstreamErrorParser = downstreamErrorParser;
         this.codeIndexService = codeIndexService;
         this.serviceDependencyTool = serviceDependencyTool;
+        this.apiCallPathTracer = apiCallPathTracer;
         this.objectMapper = objectMapper;
         this.pythonAgentClient = pythonAgentClient;
         this.diagnosisMerger = diagnosisMerger;
@@ -76,6 +92,8 @@ public class IssueResolverAgent {
     }
 
     public DiagnosisResponse analyze(IncidentRequest request) {
+        String environment = environmentRegistry.normalize(request.getEnvironment());
+        EnvironmentIndexSnapshot indexSnapshot = codeIndexService.prepareForEnvironment(environment);
         List<String> reasoningSteps = new ArrayList<>();
 
         ParseStackTraceTool.ParsedStackTrace parsed = parseStackTraceTool.parseStackTrace(request.getStackTrace());
@@ -83,7 +101,12 @@ public class IssueResolverAgent {
                 + parsed.getExceptionType()
                 + (parsed.getExceptionMessage() != null ? " - " + parsed.getExceptionMessage() : ""));
 
-        if (parsed.getTopFrame() != null) {
+        ParseStackTraceTool.StackFrame applicationFrame = parsed.getApplicationTopFrame();
+        if (applicationFrame != null) {
+            reasoningSteps.add("Application frame: " + applicationFrame.getClassName() + "." + applicationFrame.getMethodName()
+                    + "(" + applicationFrame.getFileName()
+                    + (applicationFrame.getLineNumber() != null ? ":" + applicationFrame.getLineNumber() : "") + ")");
+        } else if (parsed.getTopFrame() != null) {
             ParseStackTraceTool.StackFrame topFrame = parsed.getTopFrame();
             reasoningSteps.add("Top frame: " + topFrame.getClassName() + "." + topFrame.getMethodName()
                     + "(" + topFrame.getFileName()
@@ -92,12 +115,15 @@ public class IssueResolverAgent {
 
         String serviceDeps = serviceDependencyTool.getServiceDependencies(request.getService(), request.getApiPath());
         reasoningSteps.add("Service dependencies: " + summarize(serviceDeps));
+        reasoningSteps.add("Indexed code from branch(es): " + indexSnapshot.getIndexedBranch()
+                + " (commit " + indexSnapshot.getIndexedCommit() + ")");
 
-        DiagnosisResponse javaDiagnosis = buildRuleBasedDiagnosis(request, parsed, reasoningSteps);
+        DiagnosisResponse javaDiagnosis = buildRuleBasedDiagnosis(request, parsed, indexSnapshot, reasoningSteps, environment);
 
         if (properties.getPythonAgent().isEnabled()) {
             DiagnosisResponse pythonDiagnosis = pythonAgentClient.analyze(request);
-            return diagnosisMerger.merge(javaDiagnosis, pythonDiagnosis, properties.getMaxFilesPerRequest());
+            return enrichMetadata(diagnosisMerger.merge(javaDiagnosis, pythonDiagnosis, properties.getMaxFilesPerRequest()),
+                    environment, indexSnapshot, javaDiagnosis);
         }
 
         if (chatClient.isPresent()) {
@@ -111,7 +137,7 @@ public class IssueResolverAgent {
                         .content();
                 DiagnosisResponse llmResponse = parseDiagnosisResponse(response);
                 mergeReasoning(llmResponse, reasoningSteps);
-                return llmResponse;
+                return enrichMetadata(llmResponse, environment, indexSnapshot, javaDiagnosis);
             } catch (Exception ex) {
                 log.warn("LLM diagnosis failed, falling back to rule-based analysis: {}", ex.getMessage());
                 reasoningSteps.add("LLM unavailable or failed; used rule-based fallback.");
@@ -126,16 +152,34 @@ public class IssueResolverAgent {
     DiagnosisResponse buildRuleBasedDiagnosis(
             IncidentRequest request,
             ParseStackTraceTool.ParsedStackTrace parsed,
-            List<String> reasoningSteps) {
+            EnvironmentIndexSnapshot indexSnapshot,
+            List<String> reasoningSteps,
+            String environment) {
 
         List<AffectedFile> affectedFiles = new ArrayList<>();
+        List<CallPathStep> callPath = new ArrayList<>();
         String rootCause;
         String suggestedFix;
         ConfidenceLevel confidence = ConfidenceLevel.MEDIUM;
+        String downstreamService = null;
+        String downstreamPath = null;
 
+        ParseStackTraceTool.StackFrame applicationFrame = parsed.getApplicationTopFrame();
         ParseStackTraceTool.StackFrame topFrame = parsed.getTopFrame();
-        String methodHint = topFrame != null ? topFrame.getMethodName() : "";
-        String classHint = topFrame != null ? topFrame.getClassName() : "";
+        ParseStackTraceTool.StackFrame effectiveFrame = applicationFrame != null ? applicationFrame : topFrame;
+        String methodHint = effectiveFrame != null ? effectiveFrame.getMethodName() : "";
+        String classHint = effectiveFrame != null ? effectiveFrame.getClassName() : "";
+
+        DownstreamErrorParser.DownstreamError downstreamError = downstreamErrorParser.parse(
+                request.getStackTrace(),
+                request.getRecentLogs(),
+                request.getErrorMessage());
+        if (downstreamError.hasPath()) {
+            downstreamPath = downstreamError.getPath();
+            downstreamService = extractServiceName(downstreamPath);
+            reasoningSteps.add("Detected downstream error path: " + downstreamPath
+                    + (downstreamError.getCode() != null ? " (HTTP " + downstreamError.getCode() + ")" : ""));
+        }
 
         if (classHint.contains("RestTemplateUtility") && "extractErrorMessage".equals(methodHint)) {
             confidence = ConfidenceLevel.HIGH;
@@ -147,23 +191,44 @@ public class IssueResolverAgent {
                     + "Also verify CMS ErrorHandler returns a consistent error shape for BusinessValidationException.";
             reasoningSteps.add("Matched golden case: NPE in RestTemplateUtility.extractErrorMessage during CMS proxy call.");
 
-            codeIndexService.searchCodebase("extractErrorMessage", "ad-management-service").stream()
+            codeIndexService.searchCodebase(indexSnapshot, "extractErrorMessage", "ad-management-service").stream()
                     .limit(properties.getMaxFilesPerRequest())
-                    .forEach(result -> affectedFiles.add(toAffectedFile(result, topFrame)));
+                    .forEach(result -> affectedFiles.add(toAffectedFile(result, effectiveFrame)));
 
-            codeIndexService.findExceptionHandlers("campaign-management-service").stream()
+            codeIndexService.findExceptionHandlers(indexSnapshot, "campaign-management-service").stream()
                     .limit(1)
                     .forEach(result -> affectedFiles.add(toAffectedFile(result, null)));
-        } else if (request.getStackTrace() != null
-                && request.getStackTrace().toLowerCase().contains("businessvalidationexception")) {
+        } else if (matchesCampaignCh100CmsProxyFailure(request, downstreamError)) {
+            confidence = ConfidenceLevel.HIGH;
+            callPath = traceCallPath(request, indexSnapshot, downstreamError, reasoningSteps);
+            CallPathStep cmsController = findStep(callPath, CallPathRole.DOWNSTREAM_CONTROLLER);
+            CallPathStep cmsService = findStep(callPath, CallPathRole.DOWNSTREAM_SERVICE);
+            rootCause = "CMS returned HTTP 500 on /api/v1/campaign-management/ch-100/get. "
+                    + "AMS propagated the downstream failure via RestTemplate while handling /api/v1/campaign-ch-100.";
+            if (cmsController != null) {
+                rootCause += " CMS failure at "
+                        + cmsController.getClassName() + "." + cmsController.getMethodName()
+                        + " (line " + cmsController.getLine() + ")";
+                if (cmsService != null) {
+                    rootCause += " → investigate " + cmsService.getClassName() + "." + cmsService.getMethodName()
+                            + " implementation.";
+                }
+            }
+            suggestedFix = "Inspect CMS logs for /ch-100/get around the incident timestamp. "
+                    + "Verify request params (offset, limit, id) and CMS-side validation/data issues in "
+                    + (cmsController != null ? cmsController.getClassName() : "ChHundredCampaignController")
+                    + " and related services.";
+            reasoningSteps.add("Matched campaign-ch-100 CMS proxy failure pattern.");
+            affectedFiles.addAll(toAffectedFilesFromCallPath(callPath));
+        } else if (containsIgnoreCase(request, "businessvalidationexception")) {
             confidence = ConfidenceLevel.HIGH;
             rootCause = "CMS rejected the request with BusinessValidationException; AMS may not handle the "
-                    + "400 response body shape correctly.";
+                    + "400/500 response body shape correctly.";
             suggestedFix = "Inspect CMS ErrorHandler for the validation error payload and ensure AMS parses "
                     + "the response fields defensively.";
-            reasoningSteps.add("Detected BusinessValidationException in stack trace or logs.");
+            reasoningSteps.add("Detected BusinessValidationException in incident text.");
 
-            codeIndexService.findExceptionHandlers("campaign-management-service").stream()
+            codeIndexService.findExceptionHandlers(indexSnapshot, "campaign-management-service").stream()
                     .limit(properties.getMaxFilesPerRequest())
                     .forEach(result -> affectedFiles.add(toAffectedFile(result, null)));
         } else if (classHint.contains("Ch100ScteSlotServiceImpl") || containsIgnoreCase(request, "parseTimeToMillis")) {
@@ -174,30 +239,38 @@ public class IssueResolverAgent {
                     + "times using full precision before attaching SCTE slots.";
             reasoningSteps.add("Matched SCTE slot timing issue pattern.");
 
-            codeIndexService.searchCodebase("parseTimeToMillis", "campaign-management-service").stream()
+            codeIndexService.searchCodebase(indexSnapshot, "parseTimeToMillis", "campaign-management-service").stream()
                     .limit(properties.getMaxFilesPerRequest())
-                    .forEach(result -> affectedFiles.add(toAffectedFile(result, topFrame)));
+                    .forEach(result -> affectedFiles.add(toAffectedFile(result, effectiveFrame)));
         } else {
             rootCause = "Unable to determine root cause without LLM. Review top stack frame and downstream service mapping.";
             suggestedFix = "Inspect the failing class/method and downstream service response for the incident API path.";
             confidence = ConfidenceLevel.LOW;
 
-            if (topFrame != null) {
+            if (effectiveFrame != null) {
                 String simpleClass = classHint.contains(".")
                         ? classHint.substring(classHint.lastIndexOf('.') + 1)
                         : classHint;
-                codeIndexService.findByClassName(simpleClass).ifPresent(file -> {
+                codeIndexService.findByClassName(indexSnapshot, simpleClass).ifPresent(file -> {
                     CodeSearchResult result = new CodeSearchResult(
                             file.repo(),
                             file.relativePath(),
                             file.className(),
-                            topFrame.getLineNumber() != null ? topFrame.getLineNumber() : 1,
+                            effectiveFrame.getLineNumber() != null ? effectiveFrame.getLineNumber() : 1,
                             codeIndexService.readSnippet(
+                                    indexSnapshot,
                                     file.repo(),
                                     file.relativePath(),
-                                    topFrame.getLineNumber() != null ? topFrame.getLineNumber() : 1));
-                    affectedFiles.add(toAffectedFile(result, topFrame));
+                                    effectiveFrame.getLineNumber() != null ? effectiveFrame.getLineNumber() : 1));
+                    affectedFiles.add(toAffectedFile(result, effectiveFrame));
                 });
+            }
+        }
+
+        if (callPath.isEmpty() && shouldTraceCallPath(request, downstreamError)) {
+            callPath = traceCallPath(request, indexSnapshot, downstreamError, reasoningSteps);
+            if (!callPath.isEmpty() && affectedFiles.isEmpty()) {
+                affectedFiles.addAll(toAffectedFilesFromCallPath(callPath));
             }
         }
 
@@ -208,7 +281,113 @@ public class IssueResolverAgent {
                 .suggestedFix(suggestedFix)
                 .reasoningSteps(new ArrayList<>(reasoningSteps))
                 .relatedIncidents(List.of())
+                .environment(environment)
+                .indexedBranch(indexSnapshot.getIndexedBranch())
+                .indexedCommit(indexSnapshot.getIndexedCommit())
+                .downstreamService(downstreamService)
+                .downstreamPath(downstreamPath)
+                .callPath(callPath)
                 .build();
+    }
+
+    private boolean shouldTraceCallPath(
+            IncidentRequest request, DownstreamErrorParser.DownstreamError downstreamError) {
+        if (downstreamError != null && downstreamError.hasPath()) {
+            return true;
+        }
+        if (request.getApiPath() != null && !request.getApiPath().isBlank()) {
+            ApiMapping mapping = serviceDependencyTool.resolveApiMapping(request.getService(), request.getApiPath());
+            return mapping != null;
+        }
+        return false;
+    }
+
+    private List<CallPathStep> traceCallPath(
+            IncidentRequest request,
+            EnvironmentIndexSnapshot indexSnapshot,
+            DownstreamErrorParser.DownstreamError downstreamError,
+            List<String> reasoningSteps) {
+        List<CallPathStep> steps = apiCallPathTracer.trace(request, indexSnapshot, downstreamError);
+        if (!steps.isEmpty()) {
+            reasoningSteps.add("Traced call path: " + formatCallPathSummary(steps));
+        }
+        return steps;
+    }
+
+    private String formatCallPathSummary(List<CallPathStep> steps) {
+        return steps.stream()
+                .map(step -> step.getClassName() + "." + step.getMethodName() + " (" + step.getLine() + ")")
+                .reduce((left, right) -> left + " → " + right)
+                .orElse("none");
+    }
+
+    private CallPathStep findStep(List<CallPathStep> steps, CallPathRole role) {
+        return steps.stream()
+                .filter(step -> step.getRole() == role)
+                .findFirst()
+                .orElse(null);
+    }
+
+    private List<AffectedFile> toAffectedFilesFromCallPath(List<CallPathStep> steps) {
+        List<AffectedFile> files = new ArrayList<>();
+        for (CallPathStep step : steps) {
+            files.add(AffectedFile.builder()
+                    .repo(step.getRepo())
+                    .path(step.getPath())
+                    .lines(String.valueOf(step.getLine()))
+                    .role(step.getRole())
+                    .build());
+        }
+        return files;
+    }
+
+    private boolean matchesCampaignCh100CmsProxyFailure(
+            IncidentRequest request, DownstreamErrorParser.DownstreamError downstreamError) {
+        boolean httpServerError = containsIgnoreCase(request, "httpservererrorexception");
+        boolean campaignApi = request.getApiPath() != null
+                && request.getApiPath().startsWith("/api/v1/campaign-ch-100");
+        boolean downstreamCh100Get = downstreamError.hasPath()
+                && downstreamError.getPath().contains("ch-100/get");
+        return httpServerError && campaignApi && downstreamCh100Get;
+    }
+
+    private String extractServiceName(String downstreamPath) {
+        if (downstreamPath == null) {
+            return null;
+        }
+        if (downstreamPath.contains("campaign-management-service")) {
+            return "campaign-management-service";
+        }
+        if (downstreamPath.contains("ad-management-service")) {
+            return "ad-management-service";
+        }
+        return null;
+    }
+
+    private DiagnosisResponse enrichMetadata(
+            DiagnosisResponse response,
+            String environment,
+            EnvironmentIndexSnapshot indexSnapshot,
+            DiagnosisResponse javaDiagnosis) {
+        if (response.getEnvironment() == null) {
+            response.setEnvironment(environment);
+        }
+        if (response.getIndexedBranch() == null) {
+            response.setIndexedBranch(indexSnapshot.getIndexedBranch());
+        }
+        if (response.getIndexedCommit() == null) {
+            response.setIndexedCommit(indexSnapshot.getIndexedCommit());
+        }
+        if (response.getDownstreamPath() == null) {
+            response.setDownstreamPath(javaDiagnosis.getDownstreamPath());
+        }
+        if (response.getDownstreamService() == null) {
+            response.setDownstreamService(javaDiagnosis.getDownstreamService());
+        }
+        if (response.getCallPath() == null || response.getCallPath().isEmpty()) {
+            response.setCallPath(javaDiagnosis.getCallPath());
+        }
+        return response;
     }
 
     private boolean containsIgnoreCase(IncidentRequest request, String value) {

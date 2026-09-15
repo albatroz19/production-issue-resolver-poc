@@ -17,7 +17,8 @@ public class FindExceptionHandlersTool {
     @Tool(description = "Find @RestControllerAdvice or @ControllerAdvice exception handler classes "
             + "in the given service repository.")
     public String findExceptionHandlers(String serviceName) {
-        List<CodeSearchResult> results = codeIndexService.findExceptionHandlers(serviceName);
+        List<CodeSearchResult> results = codeIndexService
+                .findExceptionHandlers(codeIndexService.prepareForEnvironment("dev"), serviceName);
         if (results.isEmpty()) {
             return "No exception handlers found for service: " + serviceName;
         }

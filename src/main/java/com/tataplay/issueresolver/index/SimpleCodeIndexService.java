@@ -13,15 +13,18 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 @Slf4j
 @Service
+@RequiredArgsConstructor
 public class SimpleCodeIndexService {
 
     private static final Pattern PACKAGE_PATTERN = Pattern.compile("^\\s*package\\s+([\\w.]+)\\s*;");
@@ -29,32 +32,32 @@ public class SimpleCodeIndexService {
             "(?:public\\s+)?(?:class|interface|enum|record)\\s+(\\w+)");
 
     private final IssueResolverProperties properties;
-    private final Map<String, IndexedFile> classNameIndex = new HashMap<>();
-    private final List<IndexedFile> allFiles = new ArrayList<>();
+    private final GitWorkspaceService gitWorkspaceService;
+    private final Map<String, EnvironmentIndexSnapshot> indexByEnvironment = new ConcurrentHashMap<>();
 
-    public SimpleCodeIndexService(IssueResolverProperties properties) {
-        this.properties = properties;
-        buildIndex();
+    public EnvironmentIndexSnapshot prepareForEnvironment(String environment) {
+        GitWorkspaceService.GitWorkspaceResult workspace = gitWorkspaceService.prepareWorkspace(environment);
+        return indexByEnvironment.computeIfAbsent(workspace.getEnvironment(), env -> buildIndex(workspace));
     }
 
-    public Optional<IndexedFile> findByClassName(String className) {
+    public Optional<IndexedFile> findByClassName(EnvironmentIndexSnapshot snapshot, String className) {
         if (className == null || className.isBlank()) {
             return Optional.empty();
         }
         String simpleName = className.contains(".")
                 ? className.substring(className.lastIndexOf('.') + 1)
                 : className;
-        return Optional.ofNullable(classNameIndex.get(simpleName));
+        return Optional.ofNullable(snapshot.getClassNameIndex().get(simpleName));
     }
 
-    public List<CodeSearchResult> searchCodebase(String query, String repoFilter) {
+    public List<CodeSearchResult> searchCodebase(EnvironmentIndexSnapshot snapshot, String query, String repoFilter) {
         if (query == null || query.isBlank()) {
             return List.of();
         }
         String normalizedQuery = query.toLowerCase(Locale.ROOT);
         List<CodeSearchResult> results = new ArrayList<>();
 
-        for (IndexedFile file : allFiles) {
+        for (IndexedFile file : snapshot.getAllFiles()) {
             if (repoFilter != null && !repoFilter.isBlank()
                     && !file.repo().equalsIgnoreCase(repoFilter)) {
                 continue;
@@ -83,14 +86,14 @@ public class SimpleCodeIndexService {
                 .collect(Collectors.toList());
     }
 
-    public List<CodeSearchResult> findExceptionHandlers(String serviceName) {
+    public List<CodeSearchResult> findExceptionHandlers(EnvironmentIndexSnapshot snapshot, String serviceName) {
         List<String> patterns = List.of(
                 "@restcontrolleradvice",
                 "@controlleradvice",
                 "extends responseentityexceptionhandler");
         List<CodeSearchResult> results = new ArrayList<>();
 
-        for (IndexedFile file : allFiles) {
+        for (IndexedFile file : snapshot.getAllFiles()) {
             if (serviceName != null && !serviceName.isBlank()
                     && !file.repo().equalsIgnoreCase(serviceName)) {
                 continue;
@@ -117,8 +120,8 @@ public class SimpleCodeIndexService {
         return results.stream().limit(properties.getMaxFilesPerRequest()).collect(Collectors.toList());
     }
 
-    public String readSnippet(String repo, String relativePath, int centerLine) {
-        Optional<IndexedFile> file = allFiles.stream()
+    public String readSnippet(EnvironmentIndexSnapshot snapshot, String repo, String relativePath, int centerLine) {
+        Optional<IndexedFile> file = snapshot.getAllFiles().stream()
                 .filter(f -> f.repo().equals(repo) && f.relativePath().equals(relativePath))
                 .findFirst();
         if (file.isEmpty()) {
@@ -133,12 +136,15 @@ public class SimpleCodeIndexService {
         }
     }
 
-    public int indexedFileCount() {
-        return allFiles.size();
+    public int indexedFileCount(EnvironmentIndexSnapshot snapshot) {
+        return snapshot.getAllFiles().size();
     }
 
-    private void buildIndex() {
+    private EnvironmentIndexSnapshot buildIndex(GitWorkspaceService.GitWorkspaceResult workspace) {
+        Map<String, IndexedFile> classNameIndex = new HashMap<>();
+        List<IndexedFile> allFiles = new ArrayList<>();
         Path reposRoot = Paths.get(properties.getReposRoot());
+
         for (IssueResolverProperties.RepoConfig repo : properties.getRepos()) {
             Path repoPath = reposRoot.resolve(repo.getPath());
             if (!Files.isDirectory(repoPath)) {
@@ -152,16 +158,31 @@ public class SimpleCodeIndexService {
             }
             try (Stream<Path> paths = Files.walk(javaRoot)) {
                 paths.filter(path -> path.toString().endsWith(".java"))
-                        .forEach(path -> indexFile(repo.getName(), repoPath, javaRoot, path));
+                        .forEach(path -> indexFile(repo.getName(), repoPath, javaRoot, path, classNameIndex, allFiles));
             } catch (IOException ex) {
                 log.warn("Failed to walk repo {}: {}", repo.getName(), ex.getMessage());
             }
         }
-        log.info("Code index built with {} Java files across {} repos",
-                allFiles.size(), properties.getRepos().size());
+
+        log.info("Code index built for environment {} with {} Java files across {} repos",
+                workspace.getEnvironment(), allFiles.size(), properties.getRepos().size());
+
+        return EnvironmentIndexSnapshot.builder()
+                .environment(workspace.getEnvironment())
+                .indexedBranch(workspace.getIndexedBranch())
+                .indexedCommit(workspace.getIndexedCommit())
+                .classNameIndex(classNameIndex)
+                .allFiles(allFiles)
+                .build();
     }
 
-    private void indexFile(String repoName, Path repoPath, Path javaRoot, Path filePath) {
+    private void indexFile(
+            String repoName,
+            Path repoPath,
+            Path javaRoot,
+            Path filePath,
+            Map<String, IndexedFile> classNameIndex,
+            List<IndexedFile> allFiles) {
         try {
             String content = Files.readString(filePath, StandardCharsets.UTF_8);
             String packageName = extractPackage(content);

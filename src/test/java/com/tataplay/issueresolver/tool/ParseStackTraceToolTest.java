@@ -21,8 +21,24 @@ class ParseStackTraceToolTest {
 
         assertThat(parsed.getExceptionType()).isEqualTo("java.lang.NullPointerException");
         assertThat(parsed.getTopFrame().getClassName()).contains("RestTemplateUtility");
+        assertThat(parsed.getApplicationTopFrame().getClassName()).contains("RestTemplateUtility");
         assertThat(parsed.getTopFrame().getMethodName()).isEqualTo("extractErrorMessage");
         assertThat(parsed.getTopFrame().getLineNumber()).isEqualTo(48);
         assertThat(parsed.getCausedByChain()).isNotEmpty();
+    }
+
+    @Test
+    void parseStackTrace_skipsFrameworkFramesForApplicationTopFrame() {
+        String stackTrace = """
+                org.springframework.web.client.HttpServerErrorException$InternalServerError: 500
+                    at org.springframework.web.client.HttpServerErrorException.create(HttpServerErrorException.java:102)
+                    at com.tataplay.admanagement.module.ch100.campaign.service.impl.CampaignChHundredServiceImpl.getCampaign(CampaignChHundredServiceImpl.java:535)
+                """;
+
+        ParseStackTraceTool.ParsedStackTrace parsed = tool.parseStackTrace(stackTrace);
+
+        assertThat(parsed.getTopFrame().getClassName()).contains("HttpServerErrorException");
+        assertThat(parsed.getApplicationTopFrame().getClassName())
+                .isEqualTo("com.tataplay.admanagement.module.ch100.campaign.service.impl.CampaignChHundredServiceImpl");
     }
 }

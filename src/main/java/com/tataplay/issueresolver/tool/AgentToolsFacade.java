@@ -12,6 +12,8 @@ public class AgentToolsFacade {
     private final SearchCodebaseTool searchCodebaseTool;
     private final ServiceDependencyTool serviceDependencyTool;
     private final FindExceptionHandlersTool findExceptionHandlersTool;
+    private final TraceApiCallPathTool traceApiCallPathTool;
+    private final ReadCodeSnippetTool readCodeSnippetTool;
 
     @Tool(description = "Parse a Java stack trace to extract exception type, message, top frame, "
             + "and Caused by chain.")
@@ -50,5 +52,15 @@ public class AgentToolsFacade {
     @Tool(description = "Find exception handler classes in a service repository.")
     public String findExceptionHandlers(String serviceName) {
         return findExceptionHandlersTool.findExceptionHandlers(serviceName);
+    }
+
+    @Tool(description = "Trace API call path from entry controller through proxy to downstream handler.")
+    public String traceApiCallPath(String service, String apiPath, String environment) {
+        return traceApiCallPathTool.traceApiCallPath(service, apiPath, environment);
+    }
+
+    @Tool(description = "Read a code snippet centered on a specific line from an indexed repository file.")
+    public String readCodeSnippet(String repo, String path, int line, String environment) {
+        return readCodeSnippetTool.readCodeSnippet(repo, path, line, environment);
     }
 }

@@ -35,6 +35,10 @@ issue-resolver:
   agent:
     max-steps: 8
   api-key: ${POC_API_KEY:}
+  cors-allowed-origins:
+    - http://localhost:5173
+    - http://localhost:4173
+  git-checkout-enabled: ${GIT_CHECKOUT_ENABLED:true}
   python-agent:
     enabled: ${PYTHON_AGENT_ENABLED:true}
     base-url: ${PYTHON_AGENT_BASE_URL:http://localhost:8098}

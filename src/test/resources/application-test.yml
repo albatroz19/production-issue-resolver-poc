@@ -5,5 +5,6 @@ spring:
 
 issue-resolver:
   repos-root: ${REPOS_ROOT:/Users/amitasharda/Desktop/Segmentation}
+  git-checkout-enabled: false
   python-agent:
     enabled: false

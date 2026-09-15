@@ -22,4 +22,11 @@ public class DiagnosisResponse {
     private List<String> reasoningSteps = new ArrayList<>();
     @Builder.Default
     private List<String> relatedIncidents = new ArrayList<>();
+    private String environment;
+    private String indexedBranch;
+    private String indexedCommit;
+    private String downstreamService;
+    private String downstreamPath;
+    @Builder.Default
+    private List<CallPathStep> callPath = new ArrayList<>();
 }

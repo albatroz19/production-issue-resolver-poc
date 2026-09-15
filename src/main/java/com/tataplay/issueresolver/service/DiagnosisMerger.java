@@ -1,6 +1,7 @@
 package com.tataplay.issueresolver.service;
 
 import com.tataplay.issueresolver.model.AffectedFile;
+import com.tataplay.issueresolver.model.CallPathStep;
 import com.tataplay.issueresolver.model.ConfidenceLevel;
 import com.tataplay.issueresolver.model.DiagnosisResponse;
 import java.util.ArrayList;
@@ -34,6 +35,12 @@ public class DiagnosisMerger {
                 .suggestedFix(preferred.getSuggestedFix())
                 .reasoningSteps(mergeReasoningSteps(javaDiagnosis, pythonDiagnosis))
                 .relatedIncidents(mergeRelatedIncidents(javaDiagnosis, pythonDiagnosis))
+                .environment(firstNonBlank(javaDiagnosis.getEnvironment(), pythonDiagnosis.getEnvironment()))
+                .indexedBranch(firstNonBlank(javaDiagnosis.getIndexedBranch(), pythonDiagnosis.getIndexedBranch()))
+                .indexedCommit(firstNonBlank(javaDiagnosis.getIndexedCommit(), pythonDiagnosis.getIndexedCommit()))
+                .downstreamService(firstNonBlank(javaDiagnosis.getDownstreamService(), pythonDiagnosis.getDownstreamService()))
+                .downstreamPath(firstNonBlank(javaDiagnosis.getDownstreamPath(), pythonDiagnosis.getDownstreamPath()))
+                .callPath(mergeCallPath(javaDiagnosis, pythonDiagnosis))
                 .build();
     }
 
@@ -88,5 +95,19 @@ public class DiagnosisMerger {
             merged.addAll(pythonDiagnosis.getRelatedIncidents());
         }
         return new ArrayList<>(merged);
+    }
+
+    private String firstNonBlank(String left, String right) {
+        if (left != null && !left.isBlank()) {
+            return left;
+        }
+        return right;
+    }
+
+    private List<CallPathStep> mergeCallPath(DiagnosisResponse javaDiagnosis, DiagnosisResponse pythonDiagnosis) {
+        if (javaDiagnosis.getCallPath() != null && !javaDiagnosis.getCallPath().isEmpty()) {
+            return javaDiagnosis.getCallPath();
+        }
+        return pythonDiagnosis.getCallPath() != null ? pythonDiagnosis.getCallPath() : List.of();
     }
 }

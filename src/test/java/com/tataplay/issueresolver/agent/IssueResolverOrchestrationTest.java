@@ -3,19 +3,23 @@ package com.tataplay.issueresolver.agent;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tataplay.issueresolver.client.PythonAgentClient;
 import com.tataplay.issueresolver.client.PythonAgentException;
+import com.tataplay.issueresolver.config.EnvironmentRegistry;
 import com.tataplay.issueresolver.config.IssueResolverProperties;
+import com.tataplay.issueresolver.index.EnvironmentIndexSnapshot;
 import com.tataplay.issueresolver.index.SimpleCodeIndexService;
 import com.tataplay.issueresolver.model.ConfidenceLevel;
 import com.tataplay.issueresolver.model.DiagnosisResponse;
+import com.tataplay.issueresolver.model.EnvironmentProfile;
 import com.tataplay.issueresolver.model.IncidentRequest;
 import com.tataplay.issueresolver.service.DiagnosisMerger;
+import com.tataplay.issueresolver.tool.ApiCallPathTracer;
+import com.tataplay.issueresolver.tool.DownstreamErrorParser;
 import com.tataplay.issueresolver.tool.ParseStackTraceTool;
 import com.tataplay.issueresolver.tool.ServiceDependencyTool;
 import java.util.List;
@@ -35,6 +39,9 @@ class IssueResolverOrchestrationTest {
     @Mock
     private PythonAgentClient pythonAgentClient;
 
+    @Mock
+    private ApiCallPathTracer apiCallPathTracer;
+
     private IssueResolverAgent agent;
 
     @BeforeEach
@@ -44,16 +51,31 @@ class IssueResolverOrchestrationTest {
         properties.setMaxFilesPerRequest(3);
         properties.getPythonAgent().setEnabled(true);
 
+        EnvironmentProfile devProfile = new EnvironmentProfile();
+        devProfile.setGitBranches(Map.of("ad-management-service", "develop"));
+        EnvironmentRegistry environmentRegistry = new EnvironmentRegistry(Map.of("dev", devProfile));
+
         ServiceDependencyTool serviceDependencyTool = new ServiceDependencyTool();
         ServiceDependencyTool.ServiceDefinition ams = new ServiceDependencyTool.ServiceDefinition();
         ams.setDependencies(List.of("campaign-management-service"));
         serviceDependencyTool.setServices(Map.of("ad-management-service", ams));
 
+        when(codeIndexService.prepareForEnvironment(any())).thenReturn(EnvironmentIndexSnapshot.builder()
+                .environment("dev")
+                .indexedBranch("develop")
+                .indexedCommit("abc123")
+                .classNameIndex(Map.of())
+                .allFiles(List.of())
+                .build());
+
         agent = new IssueResolverAgent(
                 properties,
+                environmentRegistry,
                 new ParseStackTraceTool(),
+                new DownstreamErrorParser(new ObjectMapper()),
                 codeIndexService,
                 serviceDependencyTool,
+                apiCallPathTracer,
                 new ObjectMapper(),
                 pythonAgentClient,
                 new DiagnosisMerger(),
@@ -62,8 +84,6 @@ class IssueResolverOrchestrationTest {
 
     @Test
     void analyze_withPythonOrchestration_mergesJavaAndPythonDiagnosis() {
-        when(codeIndexService.searchCodebase(anyString(), anyString())).thenReturn(List.of());
-        when(codeIndexService.findExceptionHandlers(anyString())).thenReturn(List.of());
         when(pythonAgentClient.analyze(any(IncidentRequest.class))).thenReturn(
                 DiagnosisResponse.builder()
                         .rootCause("Python LLM root cause")

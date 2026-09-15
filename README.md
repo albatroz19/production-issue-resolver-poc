@@ -180,6 +180,18 @@ src/main/resources/
   service-map.yml                    # AMS→CMS API mappings
 ```
 
+## Environment-aware diagnosis
+
+The resolver maps `dev`, `uat`, and `prod` to git branches and API base URLs via `src/main/resources/environment-registry.yml`.
+
+On each analyze request it:
+- Checks out the configured git branch per repo (read-only; disable with `GIT_CHECKOUT_ENABLED=false`)
+- Indexes source code for that environment
+- Parses embedded downstream error JSON from logs (e.g. CMS `/ch-100/get` paths)
+- Returns `indexedBranch`, `indexedCommit`, `downstreamService`, and `downstreamPath` in the diagnosis
+
+This does **not** call live dev/uat/prod APIs — it analyzes local git clones aligned to each environment's branch.
+
 ## Phase 2 (out of scope for POC)
 
 - Monitoring webhooks (Datadog/Sentry)
