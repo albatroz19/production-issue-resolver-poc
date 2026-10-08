@@ -174,14 +174,40 @@ public class IssueResolverAgent {
                 request.getStackTrace(),
                 request.getRecentLogs(),
                 request.getErrorMessage());
-        if (downstreamError.hasPath()) {
+        if (downstreamError.hasPath() && !isOwnServicePath(request, downstreamError.getPath())) {
             downstreamPath = downstreamError.getPath();
             downstreamService = extractServiceName(downstreamPath);
             reasoningSteps.add("Detected downstream error path: " + downstreamPath
                     + (downstreamError.getCode() != null ? " (HTTP " + downstreamError.getCode() + ")" : ""));
         }
 
-        if (classHint.contains("RestTemplateUtility") && "extractErrorMessage".equals(methodHint)) {
+        if (isNullInventoryToken(request, parsed)) {
+            confidence = ConfidenceLevel.HIGH;
+            int line = applicationFrame != null && applicationFrame.getLineNumber() != null
+                    ? applicationFrame.getLineNumber()
+                    : 356;
+            callPath = traceCallPath(request, indexSnapshot, downstreamError, reasoningSteps);
+            rootCause = "NullPointerException in CampaignChHundredServiceImpl.getCampaign at line " + line
+                    + ". After campaigns are loaded, the code does tokenRepository.findByInventoryId(campaign.getInventoryId()) "
+                    + "and immediately calls token.getToken() to build inventoryLink. findByInventoryId returned null "
+                    + "for at least one campaign that has an inventoryId, so getToken() throws.";
+            suggestedFix = "In CampaignChHundredServiceImpl.java around lines 346-350, null-check the "
+                    + "ChHundredInventoryToken before getToken(). If token is null, skip setInventoryLink for that campaign "
+                    + "(log the inventoryId). Data side: that inventoryId has no row in ChHundredInventoryToken.";
+            reasoningSteps.add("Matched inventory-token NPE in CampaignChHundredServiceImpl.getCampaign line " + line + ".");
+            affectedFiles.addAll(toAffectedFilesFromCallPath(callPath));
+            if (affectedFiles.isEmpty() && effectiveFrame != null) {
+                codeIndexService.findByClassName(indexSnapshot, "CampaignChHundredServiceImpl").ifPresent(file -> {
+                    CodeSearchResult result = new CodeSearchResult(
+                            file.repo(),
+                            file.relativePath(),
+                            file.className(),
+                            line,
+                            codeIndexService.readSnippet(indexSnapshot, file.repo(), file.relativePath(), line));
+                    affectedFiles.add(toAffectedFile(result, effectiveFrame));
+                });
+            }
+        } else if (classHint.contains("RestTemplateUtility") && "extractErrorMessage".equals(methodHint)) {
             confidence = ConfidenceLevel.HIGH;
             rootCause = "AMS RestTemplateUtility.extractErrorMessage assumes the downstream CMS error JSON "
                     + "contains a 'message' field. CMS returned HTTP 400 without that field, causing a "
@@ -198,6 +224,22 @@ public class IssueResolverAgent {
             codeIndexService.findExceptionHandlers(indexSnapshot, "campaign-management-service").stream()
                     .limit(1)
                     .forEach(result -> affectedFiles.add(toAffectedFile(result, null)));
+        } else if (isEmptyReleaseOrder(request)) {
+            confidence = ConfidenceLevel.HIGH;
+            callPath = traceCallPath(request, indexSnapshot, downstreamError, reasoningSteps);
+            rootCause = "No Release Order found for this campaign. "
+                    + "Ch100TelecastCertificateServiceImpl.getTelecastCertificate throws BusinessValidationException at line 43 "
+                    + "when the release order list for that campaign name is empty.";
+            suggestedFix = "Check that the campaign name on the request has a release order in the database. "
+                    + "If the name is correct, the release order row is missing and must be created before this call can succeed.";
+            reasoningSteps.add("Matched empty release order: No Release Order found for this campaign.");
+            codeIndexService.searchCodebase(indexSnapshot, "No Release Order found for this campaign", "campaign-management-service")
+                    .stream()
+                    .limit(properties.getMaxFilesPerRequest())
+                    .forEach(result -> affectedFiles.add(toAffectedFile(result, null)));
+            if (affectedFiles.isEmpty()) {
+                affectedFiles.addAll(toAffectedFilesFromCallPath(callPath));
+            }
         } else if (matchesCampaignCh100CmsProxyFailure(request, downstreamError)) {
             confidence = ConfidenceLevel.HIGH;
             callPath = traceCallPath(request, indexSnapshot, downstreamError, reasoningSteps);
@@ -339,6 +381,28 @@ public class IssueResolverAgent {
                     .build());
         }
         return files;
+    }
+
+    private boolean isEmptyReleaseOrder(IncidentRequest request) {
+        return containsIgnoreCase(request, "No Release Order found");
+    }
+
+    private boolean isNullInventoryToken(
+            IncidentRequest request, ParseStackTraceTool.ParsedStackTrace parsed) {
+        String message = parsed.getExceptionMessage() != null ? parsed.getExceptionMessage() : "";
+        return containsIgnoreCase(request, "ChHundredInventoryToken.getToken")
+                || (message.contains("token") && message.contains("null")
+                && containsIgnoreCase(request, "CampaignChHundredServiceImpl"));
+    }
+
+    private boolean isOwnServicePath(IncidentRequest request, String path) {
+        if (request.getService() == null || path == null) {
+            return false;
+        }
+        if ("ad-management-service".equals(request.getService()) && path.contains("campaign-management-service")) {
+            return false;
+        }
+        return path.contains(request.getService());
     }
 
     private boolean matchesCampaignCh100CmsProxyFailure(

@@ -177,7 +177,7 @@ class IssueResolverAgentTest {
                 .environment("dev")
                 .apiPath("/api/v1/campaign-ch-100")
                 .httpStatus(500)
-                .errorMessage("BusinessValidationException")
+                .errorMessage("InternalServerError")
                 .relatedServices(List.of("campaign-management-service"))
                 .stackTrace("""
                         org.springframework.web.client.HttpServerErrorException$InternalServerError: 500 : "{"code":500,"path":"/campaign-management-service/api/v1/campaign-management/ch-100/get","timestamp":"1789453997041"}"
@@ -197,6 +197,66 @@ class IssueResolverAgentTest {
                 .anyMatch(step -> step.getClassName().equals("ChHundredCampaignController")
                         && step.getLine() == 72);
         assertThat(response.getRootCause()).contains("ChHundredCampaignController.getCampaign");
+    }
+
+    @Test
+    void analyze_inventoryTokenNpeGoldenCase_pointsAtGetCampaignLine356() {
+        when(apiCallPathTracer.trace(any(), any(), any())).thenReturn(List.of(
+                CallPathStep.builder()
+                        .repo("ad-management-service")
+                        .className("CampaignChHundredController")
+                        .methodName("getCampaign")
+                        .path("CampaignChHundredController.java")
+                        .line(72)
+                        .role(CallPathRole.ENTRY_CONTROLLER)
+                        .build(),
+                CallPathStep.builder()
+                        .repo("ad-management-service")
+                        .className("CampaignChHundredServiceImpl")
+                        .methodName("getCampaign")
+                        .path("CampaignChHundredServiceImpl.java")
+                        .line(352)
+                        .role(CallPathRole.ENTRY_SERVICE)
+                        .build(),
+                CallPathStep.builder()
+                        .repo("ad-management-service")
+                        .className("CampaignChHundredServiceImpl")
+                        .methodName("getCampaign")
+                        .path("CampaignChHundredServiceImpl.java")
+                        .line(356)
+                        .role(CallPathRole.ENTRY_SERVICE)
+                        .build()));
+
+        IncidentRequest request = IncidentRequest.builder()
+                .service("ad-management-service")
+                .environment("dev")
+                .apiPath("/api/v1/campaign-ch-100")
+                .httpStatus(500)
+                .errorMessage("InternalServerError")
+                .relatedServices(List.of("campaign-management-service"))
+                .stackTrace("""
+                        java.lang.NullPointerException: Cannot invoke "com.tataplay.admanagement.module.ch100.inventory.dao.entity.ChHundredInventoryToken.getToken()" because "token" is null
+                            at com.tataplay.admanagement.module.ch100.campaign.service.impl.CampaignChHundredServiceImpl.lambda$getCampaign$1(CampaignChHundredServiceImpl.java:356)
+                            at java.util.ArrayList.forEach(ArrayList.java:1511)
+                            at com.tataplay.admanagement.module.ch100.campaign.service.impl.CampaignChHundredServiceImpl.getCampaign(CampaignChHundredServiceImpl.java:352)
+                            at com.tataplay.admanagement.module.ch100.campaign.controller.CampaignChHundredController.getCampaign(CampaignChHundredController.java:72)
+                        """)
+                .recentLogs("""
+                        {"errorCode":500,"message":"Cannot invoke \\"ChHundredInventoryToken.getToken()\\" because \\"token\\" is null","path":"/ad-management-service/api/v1/campaign-ch-100"}
+                        """)
+                .build();
+
+        DiagnosisResponse response = agent.analyze(request);
+
+        assertThat(response.getConfidence()).isEqualTo(ConfidenceLevel.HIGH);
+        assertThat(response.getRootCause()).contains("356");
+        assertThat(response.getRootCause()).contains("findByInventoryId");
+        assertThat(response.getSuggestedFix()).contains("getToken()");
+        assertThat(response.getSuggestedFix()).contains("346");
+        assertThat(response.getDownstreamPath()).isNull();
+        assertThat(response.getCallPath()).extracting(CallPathStep::getLine).containsExactly(72, 352, 356);
+        assertThat(response.getCallPath()).extracting(CallPathStep::getClassName)
+                .doesNotContain("ChHundredPacksController");
     }
 
     private static IssueResolverProperties.RepoConfig repo(String name, String path) {

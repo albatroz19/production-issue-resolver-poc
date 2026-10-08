@@ -65,6 +65,28 @@ class DiagnosisMergerTest {
     }
 
     @Test
+    void merge_prefersJavaWhenBothHigh() {
+        DiagnosisResponse javaDiagnosis = DiagnosisResponse.builder()
+                .rootCause("NPE at CampaignChHundredServiceImpl.java:356")
+                .confidence(ConfidenceLevel.HIGH)
+                .suggestedFix("Null-check token before getToken()")
+                .reasoningSteps(List.of("stack"))
+                .build();
+
+        DiagnosisResponse pythonDiagnosis = DiagnosisResponse.builder()
+                .rootCause("token field is not initialized")
+                .confidence(ConfidenceLevel.HIGH)
+                .suggestedFix("Assign a default token")
+                .reasoningSteps(List.of("llm"))
+                .build();
+
+        DiagnosisResponse merged = merger.merge(javaDiagnosis, pythonDiagnosis, 3);
+
+        assertThat(merged.getRootCause()).contains("356");
+        assertThat(merged.getSuggestedFix()).contains("getToken()");
+    }
+
+    @Test
     void merge_deduplicatesAffectedFilesByRepoAndPath() {
         DiagnosisResponse javaDiagnosis = DiagnosisResponse.builder()
                 .rootCause("Java")

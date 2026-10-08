@@ -2,15 +2,15 @@ environments:
   dev:
     apiBaseUrl: https://adams-dev-api.tataplay.com
     gitBranches:
-      ad-management-service: develop
-      campaign-management-service: develop
+      ad-management-service: dev
+      campaign-management-service: dev
   uat:
     apiBaseUrl: https://adams-uat-api.tataplay.com
     gitBranches:
-      ad-management-service: release/uat
-      campaign-management-service: release/uat
+      ad-management-service: uat
+      campaign-management-service: uat
   prod:
     apiBaseUrl: https://adams-api.tataplay.com
     gitBranches:
-      ad-management-service: main
-      campaign-management-service: main
+      ad-management-service: prod
+      campaign-management-service: prod

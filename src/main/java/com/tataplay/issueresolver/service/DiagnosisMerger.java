@@ -24,9 +24,9 @@ public class DiagnosisMerger {
                 : ConfidenceLevel.LOW;
 
         ConfidenceLevel mergedConfidence = maxConfidence(javaConfidence, pythonConfidence);
-        DiagnosisResponse preferred = pythonConfidence.ordinal() <= javaConfidence.ordinal()
-                ? pythonDiagnosis
-                : javaDiagnosis;
+        DiagnosisResponse preferred = preferJavaDiagnosis(javaConfidence, pythonConfidence)
+                ? javaDiagnosis
+                : pythonDiagnosis;
 
         return DiagnosisResponse.builder()
                 .rootCause(preferred.getRootCause())
@@ -42,6 +42,13 @@ public class DiagnosisMerger {
                 .downstreamPath(firstNonBlank(javaDiagnosis.getDownstreamPath(), pythonDiagnosis.getDownstreamPath()))
                 .callPath(mergeCallPath(javaDiagnosis, pythonDiagnosis))
                 .build();
+    }
+
+    private boolean preferJavaDiagnosis(ConfidenceLevel javaConfidence, ConfidenceLevel pythonConfidence) {
+        if (javaConfidence == ConfidenceLevel.HIGH && pythonConfidence == ConfidenceLevel.HIGH) {
+            return true;
+        }
+        return javaConfidence.ordinal() < pythonConfidence.ordinal();
     }
 
     private ConfidenceLevel maxConfidence(ConfidenceLevel left, ConfidenceLevel right) {

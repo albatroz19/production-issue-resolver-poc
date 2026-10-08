@@ -37,11 +37,17 @@ public class ApiCallPathTracer {
 
     private final ServiceDependencyTool serviceDependencyTool;
     private final SimpleCodeIndexService codeIndexService;
+    private final ParseStackTraceTool parseStackTraceTool;
 
     public List<CallPathStep> trace(
             IncidentRequest request,
             EnvironmentIndexSnapshot snapshot,
             DownstreamError downstreamError) {
+        List<CallPathStep> fromStack = traceFromStack(request, snapshot);
+        if (!fromStack.isEmpty()) {
+            return fromStack;
+        }
+
         List<CallPathStep> steps = new ArrayList<>();
         if (request.getService() == null || request.getApiPath() == null || request.getApiPath().isBlank()) {
             return steps;
@@ -67,6 +73,56 @@ public class ApiCallPathTracer {
         }
 
         return steps;
+    }
+
+    private List<CallPathStep> traceFromStack(IncidentRequest request, EnvironmentIndexSnapshot snapshot) {
+        if (request.getStackTrace() == null || request.getStackTrace().isBlank()) {
+            return List.of();
+        }
+        ParseStackTraceTool.ParsedStackTrace parsed = parseStackTraceTool.parseStackTrace(request.getStackTrace());
+        List<ParseStackTraceTool.StackFrame> applicationFrames = new ArrayList<>(parsed.getFrames().stream()
+                .filter(frame -> frame.getClassName() != null && frame.getClassName().startsWith("com.tataplay."))
+                .toList());
+        java.util.Collections.reverse(applicationFrames);
+        if (applicationFrames.isEmpty()) {
+            return List.of();
+        }
+
+        List<CallPathStep> steps = new ArrayList<>();
+        for (ParseStackTraceTool.StackFrame frame : applicationFrames) {
+            String simpleName = frame.getClassName().substring(frame.getClassName().lastIndexOf('.') + 1);
+            Optional<IndexedFile> indexed = codeIndexService.findByClassName(snapshot, simpleName);
+            if (indexed.isEmpty()) {
+                continue;
+            }
+            IndexedFile file = indexed.get();
+            int line = frame.getLineNumber() != null ? frame.getLineNumber() : 1;
+            String methodName = displayMethodName(frame.getMethodName());
+            steps.add(buildStep(snapshot, file, line, methodName, roleFor(file, request.getService())));
+        }
+        return steps;
+    }
+
+    private String displayMethodName(String methodName) {
+        if (methodName == null || methodName.isBlank()) {
+            return "unknown";
+        }
+        if (methodName.startsWith("lambda$") && methodName.contains("$")) {
+            String inner = methodName.substring("lambda$".length());
+            int end = inner.indexOf('$');
+            if (end > 0) {
+                return inner.substring(0, end);
+            }
+        }
+        return methodName;
+    }
+
+    private CallPathRole roleFor(IndexedFile file, String requestService) {
+        boolean entryRepo = requestService == null || requestService.equalsIgnoreCase(file.repo());
+        if (file.className().endsWith("Controller")) {
+            return entryRepo ? CallPathRole.ENTRY_CONTROLLER : CallPathRole.DOWNSTREAM_CONTROLLER;
+        }
+        return entryRepo ? CallPathRole.ENTRY_SERVICE : CallPathRole.DOWNSTREAM_SERVICE;
     }
 
     private Optional<CallPathStep> findEntryController(
@@ -211,21 +267,57 @@ public class ApiCallPathTracer {
     }
 
     private boolean matchesControllerPath(List<String> lines, String apiPath, String pathSegment) {
-        String content = String.join("\n", lines);
-        return content.contains(apiPath) || content.contains(pathSegment);
+        String classMapping = extractClassRequestMapping(lines);
+        if (classMapping == null) {
+            return false;
+        }
+        String normalizedMapping = normalizePath(classMapping);
+        String normalizedApi = normalizePath(apiPath);
+        return normalizedApi.equals(normalizedMapping) || normalizedApi.startsWith(normalizedMapping + "/");
+    }
+
+    private String extractClassRequestMapping(List<String> lines) {
+        for (String line : lines) {
+            Matcher matcher = REQUEST_MAPPING_PATTERN.matcher(line);
+            if (matcher.find()) {
+                return matcher.group(1);
+            }
+        }
+        return null;
+    }
+
+    private String normalizePath(String path) {
+        if (path == null) {
+            return "";
+        }
+        String trimmed = path.trim();
+        if (trimmed.length() > 1 && trimmed.endsWith("/")) {
+            return trimmed.substring(0, trimmed.length() - 1);
+        }
+        return trimmed;
     }
 
     private int findControllerMappingLine(List<String> lines, String apiPath, String pathSegment) {
+        String normalizedApi = normalizePath(apiPath);
         for (int i = 0; i < lines.size(); i++) {
             String line = lines.get(i);
-            if (line.contains("@RequestMapping") && (line.contains(apiPath) || line.contains(pathSegment))) {
-                return i + 1;
-            }
-            if (line.contains("@GetMapping") && line.trim().equals("@GetMapping")) {
-                return i + 1;
+            Matcher matcher = REQUEST_MAPPING_PATTERN.matcher(line);
+            if (matcher.find() && normalizePath(matcher.group(1)).equals(normalizedApi)) {
+                int methodLine = findHandlerMethodLine(lines, i + 1);
+                return methodLine > 0 ? methodLine : i + 1;
             }
         }
         return 1;
+    }
+
+    private int findHandlerMethodLine(List<String> lines, int afterMappingIndex) {
+        for (int i = afterMappingIndex; i < lines.size(); i++) {
+            String line = lines.get(i).trim();
+            if (line.contains("public ") && line.contains("(")) {
+                return i + 1;
+            }
+        }
+        return -1;
     }
 
     private String extractMethodNameNearLine(List<String> lines, int mappingLine, String hint) {

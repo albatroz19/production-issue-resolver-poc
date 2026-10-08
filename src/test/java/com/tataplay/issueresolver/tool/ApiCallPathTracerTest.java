@@ -35,7 +35,7 @@ class ApiCallPathTracerTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        tracer = new ApiCallPathTracer(serviceDependencyTool, codeIndexService);
+        tracer = new ApiCallPathTracer(serviceDependencyTool, codeIndexService, new ParseStackTraceTool());
         snapshot = FixtureIndexSupport.buildSnapshot();
 
         when(codeIndexService.findByClassName(any(), eq("CampaignChHundredServiceImpl")))
@@ -79,5 +79,36 @@ class ApiCallPathTracerTest {
                 .orElseThrow();
         assertThat(cmsController.getLine()).isGreaterThan(1);
         assertThat(cmsController.getMethodName()).isEqualTo("getCampaign");
+    }
+
+    @Test
+    void trace_usesStackFramesInsteadOfPrefixMatch() {
+        when(codeIndexService.findByClassName(any(), eq("CampaignChHundredController")))
+                .thenAnswer(invocation -> java.util.Optional.of(
+                        snapshot.getClassNameIndex().get("CampaignChHundredController")));
+
+        IncidentRequest request = IncidentRequest.builder()
+                .service("ad-management-service")
+                .apiPath("/api/v1/campaign-ch-100")
+                .environment("dev")
+                .stackTrace("""
+                        java.lang.NullPointerException: Cannot invoke "ChHundredInventoryToken.getToken()" because "token" is null
+                        \tat com.tataplay.admanagement.module.ch100.campaign.service.impl.CampaignChHundredServiceImpl.lambda$getCampaign$1(CampaignChHundredServiceImpl.java:356)
+                        \tat com.tataplay.admanagement.module.ch100.campaign.service.impl.CampaignChHundredServiceImpl.getCampaign(CampaignChHundredServiceImpl.java:352)
+                        \tat com.tataplay.admanagement.controller.CampaignChHundredController.getCampaign(CampaignChHundredController.java:72)
+                        """)
+                .build();
+
+        List<CallPathStep> steps = tracer.trace(request, snapshot, DownstreamError.builder().build());
+
+        assertThat(steps).extracting(CallPathStep::getClassName)
+                .containsExactly(
+                        "CampaignChHundredController",
+                        "CampaignChHundredServiceImpl",
+                        "CampaignChHundredServiceImpl");
+        assertThat(steps).extracting(CallPathStep::getLine).containsExactly(72, 352, 356);
+        assertThat(steps).extracting(CallPathStep::getMethodName)
+                .containsExactly("getCampaign", "getCampaign", "getCampaign");
+        assertThat(steps).extracting(CallPathStep::getClassName).doesNotContain("ChHundredPacksController");
     }
 }
